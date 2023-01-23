@@ -28,6 +28,7 @@
 #include "program.h"
 #include "asm.h"
 #include "batch.h"
+#include <helper/bits.h>
 
 static int riscv013_on_step_or_resume(struct target *target, bool step);
 static int riscv013_step_or_resume_current_hart(struct target *target,
@@ -76,6 +77,9 @@ static int write_memory(struct target *target, target_addr_t address,
 #define set_field(reg, mask, val) (((reg) & ~(mask)) | (((val) * ((mask) & ~((mask) << 1))) & (mask)))
 
 #define RISCV013_INFO(r) riscv013_info_t *r = get_info(target)
+
+#define MASK16_LOW_BITS 0xffff0000
+#define MASK8_LOW_BITS 0xffffff00
 
 /*** JTAG registers. ***/
 
@@ -1694,6 +1698,7 @@ static int examine(struct target *target)
 	 * program buffer. */
 	r->debug_buffer_size = info->progbufsize;
 
+	/* initial xlen assumption for read abstract commands, abstract commands can be with 64 or 32 bit only (we don't support 128 bits)*/
 	int result = register_read_abstract(target, NULL, GDB_REGNO_S0, 64);
 	if (result == ERROR_OK)
 		r->xlen = 64;
@@ -1714,6 +1719,28 @@ static int examine(struct target *target)
 
 	if (register_read_direct(target, &r->misa, GDB_REGNO_MISA)) {
 		LOG_TARGET_ERROR(target, "Fatal: Failed to read MISA.");
+		return ERROR_FAIL;
+	}
+	
+	/* set the actual xlen value from misa csr, currently we don't support XLEN of 128 bits */
+	unsigned xlen_misa = (r->misa >> (r->xlen - 2)) << 5;
+	if (xlen_misa != 0)
+	{
+		if (xlen_misa != 32 && xlen_misa != 64)
+		{
+			LOG_ERROR("misa xlen can be 64 or 32 only, current value is: %d", xlen_misa);
+			return ERROR_FAIL;
+		}
+		if (xlen_misa != r->xlen)
+		{
+			LOG_ERROR("misa xlen value %d doesn't match the value of r->xlen %d", xlen_misa, r->xlen);
+			return ERROR_FAIL;
+		}
+	}
+	else
+	{
+		/* Although `misa == 0` is valid in the RISC-V priv spec, we do not support it.  */
+		LOG_ERROR("Fatal: misa xlen value is 0");
 		return ERROR_FAIL;
 	}
 
@@ -3038,23 +3065,45 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 	LOG_DEBUG("reading %d words of %d bytes from 0x%" TARGET_PRIxADDR, count,
 			  size, address);
 
+	/* if size is not 16,8,4,2,1 an assert will be raised */
+	if(!(size == 16 || size == 8 || size == 4 || size == 2 || size == 1))
+	{
+		LOG_DEBUG("Wrong size parameter");
+		assert(false);
+	}
+
 	memset(buffer, 0, count * size);
 
-	/* Convert the size (bytes) to width (bits) */
-	unsigned width = size << 3;
+	unsigned xlen = riscv_xlen(target);
+	unsigned packet_len = size << 3;
+	unsigned width = MIN(packet_len, xlen);
+	unsigned int width32 = (width < 32) ? 32 : width;
+
+
+	if(packet_len > xlen)
+	{
+		/* in case of packet length is greater than xlen we divide the size and multiply the count accordingly */
+		unsigned shift_count = (packet_len / xlen) >> 1;
+		size = size >> shift_count;
+		count = count << shift_count;
+	}
+	else if (packet_len < xlen)
+	{
+		use_aampostincrement = false;
+	}
+
 
 	/* Create the command (physical address, postincrement, read) */
-	uint32_t command = access_memory_command(target, false, width, use_aampostincrement, false);
+	uint32_t command = access_memory_command(target, false, width32, use_aampostincrement, false);
 
 	/* Execute the reads */
 	uint8_t *p = buffer;
 	bool updateaddr = true;
-	unsigned int width32 = (width < 32) ? 32 : width;
 	for (uint32_t c = 0; c < count; c++) {
 		/* Update the address if it is the first time or aampostincrement is not supported by the target. */
 		if (updateaddr) {
 			/* Set arg1 to the address: address + c * size */
-			result = write_abstract_arg(target, 1, address + c * size, riscv_xlen(target));
+			result = write_abstract_arg(target, 1, address + c * size, xlen);
 			if (result != ERROR_OK) {
 				LOG_ERROR("Failed to write arg1 during read_memory_abstract().");
 				return result;
@@ -3067,7 +3116,7 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 		if (info->has_aampostincrement == YNM_MAYBE) {
 			if (result == ERROR_OK) {
 				/* Safety: double-check that the address was really auto-incremented */
-				riscv_reg_t new_address = read_abstract_arg(target, 1, riscv_xlen(target));
+				riscv_reg_t new_address = read_abstract_arg(target, 1, xlen);
 				if (new_address == address + size) {
 					LOG_DEBUG("aampostincrement is supported on this target.");
 					info->has_aampostincrement = YNM_YES;
@@ -3077,7 +3126,7 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 				}
 			} else {
 				/* Try the same access but with postincrement disabled. */
-				command = access_memory_command(target, false, width, false, false);
+				command = access_memory_command(target, false, width32, false, false);
 				result = execute_abstract_command(target, command);
 				if (result == ERROR_OK) {
 					LOG_DEBUG("aampostincrement is not supported on this target.");
@@ -3091,7 +3140,14 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 
 		/* Copy arg0 to buffer (rounded width up to nearest 32) */
 		riscv_reg_t value = read_abstract_arg(target, 0, width32);
-		buf_set_u64(p, 0, 8 * size, value);
+		if (width32 == 64)
+		{
+			buf_set_u64(p, 0, 8 * size, value);
+		}
+		else
+		{
+			buf_set_u32(p, 0, 8 * size, value);
+		}
 
 		if (info->has_aampostincrement == YNM_YES)
 			updateaddr = false;
@@ -3116,19 +3172,68 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 	LOG_DEBUG("writing %d words of %d bytes from 0x%" TARGET_PRIxADDR, count,
 			  size, address);
 
-	/* Convert the size (bytes) to width (bits) */
-	unsigned width = size << 3;
+	/* if size is not 16,8,4,2,1 an assert will be raised */
+	if(!(size == 16 || size == 8 || size == 4 || size == 2 || size == 1))
+	{
+		LOG_DEBUG("Wrong size parameter");
+		assert(false);
+	}
+
+	unsigned xlen = riscv_xlen(target);
+	unsigned packet_len = size << 3;
+	unsigned width = MIN(packet_len, xlen);
+	unsigned int width32 = (width < 32) ? 32 : width;
+
+
+	if(packet_len > xlen)
+	{
+		/* in case of packet length is greater than xlen we divide the size and multiply the count accordingly */
+		unsigned shift_count = (packet_len / xlen) >> 1;
+		size = size >> shift_count;
+		count = count << shift_count;
+	}
 
 	/* Create the command (physical address, postincrement, write) */
-	uint32_t command = access_memory_command(target, false, width, use_aampostincrement, true);
+	uint32_t command = access_memory_command(target, false, width32, use_aampostincrement, true);
 
 	/* Execute the writes */
 	const uint8_t *p = buffer;
 	bool updateaddr = true;
 	for (uint32_t c = 0; c < count; c++) {
+		riscv_reg_t value = 0;
 		/* Move data to arg0 */
-		riscv_reg_t value = buf_get_u64(p, 0, 8 * size);
-		result = write_abstract_arg(target, 0, value, riscv_xlen(target));
+		if (width32 == 64)
+		{
+			value = buf_get_u64(p, 0, 8 * size );
+		}
+		else
+		{
+			if (size == 4)
+			{
+				value = buf_get_u32(p, 0, 8 * size);
+			}
+			/* packet_len is lower that 32 bits */
+			else
+			{
+				use_aampostincrement = false;
+				/* Create the command (physical address, postincrement, write) */
+				command = access_memory_command(target, false, width32, use_aampostincrement, true);
+				uint8_t read_buffer[4];
+				read_memory_abstract(target, address + c * size, size, 1, read_buffer, 0);
+				value = buf_get_u32(p, 0, 8 * size);
+
+				if (size == 2)
+				{
+					value = (*(uint32_t *)read_buffer & MASK16_LOW_BITS) | value;
+				}
+				else if (size == 1)
+				{
+					value = (*(uint32_t *)read_buffer & MASK8_LOW_BITS) | value;
+				}
+			}
+		}
+
+		result = write_abstract_arg(target, 0, value, xlen);
 		if (result != ERROR_OK) {
 			LOG_ERROR("Failed to write arg0 during write_memory_abstract().");
 			return result;
@@ -3137,7 +3242,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 		/* Update the address if it is the first time or aampostincrement is not supported by the target. */
 		if (updateaddr) {
 			/* Set arg1 to the address: address + c * size */
-			result = write_abstract_arg(target, 1, address + c * size, riscv_xlen(target));
+			result = write_abstract_arg(target, 1, address + c * size, xlen);
 			if (result != ERROR_OK) {
 				LOG_ERROR("Failed to write arg1 during write_memory_abstract().");
 				return result;
@@ -3150,7 +3255,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 		if (info->has_aampostincrement == YNM_MAYBE) {
 			if (result == ERROR_OK) {
 				/* Safety: double-check that the address was really auto-incremented */
-				riscv_reg_t new_address = read_abstract_arg(target, 1, riscv_xlen(target));
+				riscv_reg_t new_address = read_abstract_arg(target, 1, xlen);
 				if (new_address == address + size) {
 					LOG_DEBUG("aampostincrement is supported on this target.");
 					info->has_aampostincrement = YNM_YES;
@@ -3160,7 +3265,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 				}
 			} else {
 				/* Try the same access but with postincrement disabled. */
-				command = access_memory_command(target, false, width, false, true);
+				command = access_memory_command(target, false, width32, false, true);
 				result = execute_abstract_command(target, command);
 				if (result == ERROR_OK) {
 					LOG_DEBUG("aampostincrement is not supported on this target.");
