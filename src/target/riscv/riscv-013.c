@@ -1731,7 +1731,7 @@ static int examine(struct target *target)
 			LOG_ERROR("misa xlen can be 64 or 32 only, current value is: %d", xlen_misa);
 			return ERROR_FAIL;
 		}
-		if (xlen_misa != r->xlen)
+		if (xlen_misa != (unsigned)r->xlen)
 		{
 			LOG_ERROR("misa xlen value %d doesn't match the value of r->xlen %d", xlen_misa, r->xlen);
 			return ERROR_FAIL;
