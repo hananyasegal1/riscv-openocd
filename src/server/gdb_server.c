@@ -3166,7 +3166,7 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 
 			return true;
 		}
-		else {
+		else if (target->rtos){
 		  /* Switch to the thread that is being stepped.  */
 		  target->rtos->current_threadid = thread_id;
 		}
