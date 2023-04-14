@@ -3224,11 +3224,11 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 
 				if (size == 2)
 				{
-					value = (*(uint32_t *)read_buffer & MASK16_LOW_BITS) | value;
+					value = (buf_get_u32(read_buffer, 0, 32) & MASK16_LOW_BITS) | value;
 				}
 				else if (size == 1)
 				{
-					value = (*(uint32_t *)read_buffer & MASK8_LOW_BITS) | value;
+					value = (buf_get_u32(read_buffer, 0, 32) & MASK8_LOW_BITS) | value;
 				}
 			}
 		}
