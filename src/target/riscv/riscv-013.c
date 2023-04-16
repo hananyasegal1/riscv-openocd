@@ -3377,11 +3377,13 @@ static int write_memory_abstract_internal(struct target *target, target_addr_t a
 				/* Create the command (physical address, postincrement, write) */
 				command = access_memory_command(target, false, width32, use_aampostincrement, true);
 				uint8_t read_buffer[4];
-				read_memory_abstract(target, address + c * size, size, 1, read_buffer, 0);
+                /* Read 32bits from target */
+				read_memory_abstract(target, address + c * size, 4, 1, read_buffer, 0);
                 LOG_ERROR("Nati_W5a: [0]:0x%x,[1]:0x%x,[2]:0x%x,[3]:0x%x",read_buffer[0],read_buffer[1],read_buffer[2],read_buffer[3]);
 				value = buf_get_u32(p, 0, 8 * size);
                 LOG_ERROR("Nati_W5b: value to write to target=0x%x",value);
 
+                /* Modify the correct portion (8bits or 16bits) */
 				if (size == 2)
 				{
 					value = (buf_get_u32(read_buffer, 0, 32) & MASK16_LOW_BITS) | value;
@@ -3393,6 +3395,7 @@ static int write_memory_abstract_internal(struct target *target, target_addr_t a
 			}
 		}
 
+		/* Write back to the target */
 		result = write_abstract_arg(target, 0, value, xlen);
 		if (result != ERROR_OK) {
 			LOG_ERROR("Failed to write arg0 during write_memory_abstract().");
