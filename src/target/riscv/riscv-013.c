@@ -3071,51 +3071,53 @@ static bool mem_should_skip_abstract(struct target *target, target_addr_t addres
 static int read_memory_abstract(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment)
 {
-    int result = ERROR_OK;
-    uint32_t unalignedBytes, remainingBytes;
-    uint32_t tempValue=0;
+	int result = ERROR_OK;
+	uint32_t unalignedBytes, remainingBytes;
+	uint32_t tempValue=0;
     
-    memset(buffer, 0, count * size);
+	memset(buffer, 0, count * size);
     
-    unalignedBytes = address & CHECK_IF_ALIGNED_TO_4; 
-    if (0 == unalignedBytes)
-    {
-        /* If 'address' is aligned to 32bits, then just call read_memory_abstract_internal function to handle the read request */
-        result = read_memory_abstract_internal(target, address, size, count, buffer, increment);
-    }
-    else /* If 'address' is not aligned to 32bits then handle the request in 2 steps: 
-            **Step 1** - read 32bits from the nearest aligned address and fetch from it the relevant bytes (1,2 or 3 according the alignment).
-            **Step 2** - read from the next aligned address the remaining bytes of the read request */
-    {
-        /* Step1 */
+	unalignedBytes = address & CHECK_IF_ALIGNED_TO_4; 
+	if (0 == unalignedBytes)
+	{
+		/* If 'address' is aligned to 32bits, then just call read_memory_abstract_internal function to handle the read request */
+		result = read_memory_abstract_internal(target, address, size, count, buffer, increment);
+	}
+	else /* If 'address' is not aligned to 32bits then handle the request in 2 steps: 
+			**Step 1** - read 32bits from the nearest aligned address and fetch from it the relevant bytes (1,2 or 3 according the alignment).
+			**Step 2** - read from the next aligned address the remaining bytes of the read request */
+	{
+		/* Step1 */
         
-        /* Align the start address to 32bit */
-        address -= (4 - unalignedBytes);
-        /* read one unit of 32bits from target into tempValue */
-        result = read_memory_abstract_internal(target, address, 4, 1, (uint8_t*)&tempValue, increment); 
-        if (result == ERROR_OK)
-        {
-            /* Get rid of the unaligned part of tempValue. If alignment =1 mask upper 8 bits, if =2 mask upper 16 bits and if 3 - upper 24 bits */
-            tempValue &= MASK_LOW_PER_ALIGNMENT[unalignedBytes];
-            /* Move the relevant bits to their correct location before the copy */
-            tempValue >>= (unalignedBytes<<3);
-            /* Copy to 'buffer' 1 or 2 or 3 bytes from tempValue */
-            memcpy(buffer, &tempValue, unalignedBytes); 
+		/* Align the start address to 32bit */
+		address -= (4 - unalignedBytes);
+		/* read one unit of 32bits from target into tempValue */
+		result = read_memory_abstract_internal(target, address, 4, 1, (uint8_t*)&tempValue, increment); 
+		if (result == ERROR_OK)
+		{
+			/* Get rid of the unaligned part of tempValue. If alignment =1 mask upper 8 bits, if =2 mask upper 16 bits and if 3 - upper 24 bits */
+			tempValue &= MASK_LOW_PER_ALIGNMENT[unalignedBytes];
+			/* Move the relevant bits to their correct location before the copy */
+			tempValue >>= (unalignedBytes<<3);
+			/* Copy to 'buffer' 1 or 2 or 3 bytes from tempValue */
+			memcpy(buffer, &tempValue, unalignedBytes); 
 
-            /* Step 2 */
+			/* Step 2 */
             
-            /* Advance the start of 'buffer' for the remaining bytes */
-            buffer += unalignedBytes; 
-            /* Update how many bytes are left to read */
-            remainingBytes = (size * count) - unalignedBytes;
-            if (0 < remainingBytes)
-            {
-                /* call the internal function to handle the rest of the read request */ 
-                result = read_memory_abstract_internal(target, address, remainingBytes, 1, buffer, increment);
-            }
-        }
-    }
-    return (result);
+			/* Update the number of bytes left to read */
+			remainingBytes = (size * count) - unalignedBytes;
+			if (0 < remainingBytes)
+			{
+				/* Advance to next aligned address */
+				address +=4;
+				/* Advance the start of 'buffer' for the remaining bytes */
+				buffer += unalignedBytes; 
+				/* call the internal function to handle the rest of the read request */ 
+				result = read_memory_abstract_internal(target, address, remainingBytes, 1, buffer, increment);
+			}
+		}
+	}
+	return (result);
 }
 
     
@@ -3348,11 +3350,11 @@ static int write_memory_abstract_internal(struct target *target, target_addr_t a
 				/* Create the command (physical address, postincrement, write) */
 				command = access_memory_command(target, false, width32, use_aampostincrement, true);
 				uint8_t read_buffer[4];
-                /* Read 32bits from target */
+				/* Read 32bits from target */
 				read_memory_abstract(target, address + c * size, 4, 1, read_buffer, 0);
 				value = buf_get_u32(p, 0, 8 * size);
 
-                /* Modify the correct portion (8bits or 16bits) */
+				/* Modify the correct portion (8bits or 16bits) */
 				if (size == 2)
 				{
 					value = (buf_get_u32(read_buffer, 0, 32) & MASK16_LOW_BITS) | value;
