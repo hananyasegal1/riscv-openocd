@@ -82,19 +82,19 @@ static int write_memory_abstract_internal(struct target *target, target_addr_t a
 
 #define RISCV013_INFO(r) riscv013_info_t *r = get_info(target)
 
-#define MASK_ON_ALL            0xffffffff
-#define MASK_ON_8_HIGH_BITS    0x000000ff
-#define MASK_ON_16_HIGH_BITS   0x0000ffff
-#define MASK_ON_24_HIGH_BITS   0x00ffffff
+#define MASK_8_BITS    0x000000ff
+#define MASK_16_BITS   0x0000ffff
+#define MASK_24_BITS   0x00ffffff
+#define MASK_32_BITS   0xffffffff
 
-#define MASK_OFF_8_HIGH_BITS   0xffffff00
-#define MASK_OFF_16_HIGH_BITS  0xffff0000
-#define MASK_OFF_24_HIGH_BITS  0xff000000
+#define MASK_HIGH_24_BITS  0xffffff00
+#define MASK_HIGH_16_BITS  0xffff0000
+#define MASK_HIGH_8_BITS   0xff000000
 
-const uint32_t MASK_HIGH_PER_ALIGNMENT[4] = {MASK_ON_ALL, MASK_ON_8_HIGH_BITS, MASK_ON_16_HIGH_BITS, MASK_ON_24_HIGH_BITS}; 
-const uint32_t MASK_LOW_PER_ALIGNMENT[4] = {MASK_ON_ALL, MASK_OFF_8_HIGH_BITS, MASK_OFF_16_HIGH_BITS, MASK_OFF_24_HIGH_BITS}; 
+const uint32_t MASK_PER_ALIGNMENT[4] = {MASK_32_BITS, MASK_8_BITS, MASK_16_BITS, MASK_24_BITS}; 
+const uint32_t SET_OFF_PER_ALIGNMENT[4] = {MASK_32_BITS, MASK_HIGH_24_BITS, MASK_HIGH_16_BITS, MASK_HIGH_8_BITS}; 
 
-#define CHECK_IF_ALIGNED_TO_4  3  /* bitwise AND with '3' tells whether the number is aligned to 4 or not */
+#define MASK_UNALIGNED_BYTES_4  3  /* Mask for the unaligned bytes with 4 byte alignment */
 
 /*** JTAG registers. ***/
 
@@ -3077,7 +3077,7 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
     
 	memset(buffer, 0, count * size);
     
-	unalignedBytes = address & CHECK_IF_ALIGNED_TO_4; 
+	unalignedBytes = address & MASK_UNALIGNED_BYTES_4; 
 	if (0 == unalignedBytes)
 	{
 		/* If 'address' is aligned to 32bits, then just call read_memory_abstract_internal function to handle the read request */
@@ -3095,8 +3095,8 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 		result = read_memory_abstract_internal(target, address, 4, 1, (uint8_t*)&tempValue, increment); 
 		if (result == ERROR_OK)
 		{
-			/* Get rid of the unaligned part of tempValue. If alignment =1 mask upper 8 bits, if =2 mask upper 16 bits and if 3 - upper 24 bits */
-			tempValue &= MASK_LOW_PER_ALIGNMENT[unalignedBytes];
+			/* Get rid of the unaligned part of tempValue. If alignment =1 set off low 8 bits, if =2 set off low 16 bits and if 3 - set off low 24 bits */
+			tempValue &= SET_OFF_PER_ALIGNMENT[unalignedBytes];
 			/* Move the relevant bits to their correct location before the copy */
 			tempValue >>= (unalignedBytes<<3);
 			/* Copy to 'buffer' 1 or 2 or 3 bytes from tempValue */
@@ -3239,14 +3239,14 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
     uint32_t bufferFromTarget=0;
     uint32_t valueToTarget=0;
     
-    unalignedBytes = address & CHECK_IF_ALIGNED_TO_4; 
+    unalignedBytes = address & MASK_UNALIGNED_BYTES_4; 
     if (0 == unalignedBytes)
     {
         /* If 'address' is aligned to 32bits, then just call write_memory_abstract_internal function to handle the write request */
         result = write_memory_abstract_internal(target, address, size, count, buffer);
     }
     /* If 'address' is not aligned to 32bits then handle the request in 2 steps:
-     **Step 1** - read 32bits from target from aligned address. Modify the relevant bytes (1,2 or 3) and write back to target.
+     **Step 1** - read 32bits from target from aligned address. Modify the relevant bytes (1,2 or 3 bytes) and write back to target.
      **Step 2** - write the remaining bytes of the write request to the next aligned address  */
     else
     {
@@ -3258,8 +3258,8 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
         result = read_memory_abstract_internal(target, address, 4, 1, (uint8_t*)&bufferFromTarget, 0);
         if (result == ERROR_OK)
         {
-            /* Get rid of the unaligned part of 'bufferFromTarget' . If alignment=1 mask upper 8 bits, if =2 mask upper 16 bits and if 3 - upper 24 bits */
-            bufferFromTarget &= MASK_HIGH_PER_ALIGNMENT[unalignedBytes];
+            /* Get rid of the unaligned part of 'bufferFromTarget' . If alignment=1 mask low 8 bits, if =2 mask low 16 bits and if 3 - low 24 bits */
+            bufferFromTarget &= MASK_PER_ALIGNMENT[unalignedBytes];
             /* Copy relevant bytes (according the alignment) from input buffer to 'valueToTarget' */
             valueToTarget = buf_get_u32(buffer, 0, (4-unalignedBytes)<<3);
             /* Move the bytes to their correct place in 'valueToTarget' (according the alignment) */
