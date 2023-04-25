@@ -3084,8 +3084,8 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 		result = read_memory_abstract_internal(target, address, size, count, buffer, increment);
 	}
 	else /* If 'address' is not aligned to 32bits then handle the request in 2 steps: 
-			**Step 1** - read 32bits from the nearest aligned address and fetch from it the relevant bytes (1,2 or 3 according the alignment).
-			**Step 2** - read from the next aligned address the remaining bytes of the read request */
+		**Step 1** - read 32bits from the nearest aligned address and fetch from it the relevant bytes (1,2 or 3 according the alignment).
+		**Step 2** - read from the next aligned address the remaining bytes of the read request */
 	{
 		/* Step1 */
         
