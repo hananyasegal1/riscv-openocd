@@ -95,6 +95,7 @@ const uint32_t MASK_PER_ALIGNMENT[4] = {MASK_32_BITS, MASK_8_BITS, MASK_16_BITS,
 const uint32_t SET_OFF_PER_ALIGNMENT[4] = {MASK_32_BITS, MASK_HIGH_24_BITS, MASK_HIGH_16_BITS, MASK_HIGH_8_BITS}; 
 
 #define MASK_UNALIGNED_BYTES_4  3  /* Mask for the unaligned bytes with 4 byte alignment */
+#define BYTES_TO_COPY(unalignedBytes) (4-unalignedBytes) /* After aligning unaligned start address, the number of bytes to copy there is 4-unalignedBytes number */
 
 /*** JTAG registers. ***/
 
@@ -3072,11 +3073,12 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment)
 {
 	int result = ERROR_OK;
-	uint32_t unalignedBytes, remainingBytes;
-	uint32_t tempValue=0;
-    
+	uint32_t unalignedBytes;
+	int remainingBytes;
+	uint8_t tempValue[4]={0};
+
 	memset(buffer, 0, count * size);
-    
+
 	unalignedBytes = address & MASK_UNALIGNED_BYTES_4; 
 	if (0 == unalignedBytes)
 	{
@@ -3088,30 +3090,27 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 		**Step 2** - read from the next aligned address the remaining bytes of the read request */
 	{
 		/* Step1 */
-        
+
 		/* Align the start address to 32bit */
-		address -= (4 - unalignedBytes);
+		address -= unalignedBytes;
+
 		/* read one unit of 32bits from target into tempValue */
-		result = read_memory_abstract_internal(target, address, 4, 1, (uint8_t*)&tempValue, increment); 
+		result = read_memory_abstract_internal(target, address, 4, 1, (uint8_t*)tempValue, increment); 
 		if (result == ERROR_OK)
 		{
-			/* Get rid of the unaligned part of tempValue. If alignment =1 set off low 8 bits, if =2 set off low 16 bits and if 3 - set off low 24 bits */
-			tempValue &= SET_OFF_PER_ALIGNMENT[unalignedBytes];
-			/* Move the relevant bits to their correct location before the copy */
-			tempValue >>= (unalignedBytes<<3);
 			/* Copy to 'buffer' 1 or 2 or 3 bytes from tempValue */
-			memcpy(buffer, &tempValue, unalignedBytes); 
+			memcpy(buffer, &(tempValue[unalignedBytes]), BYTES_TO_COPY(unalignedBytes));
 
 			/* Step 2 */
-            
+
 			/* Update the number of bytes left to read */
-			remainingBytes = (size * count) - unalignedBytes;
+			remainingBytes = (size * count) - BYTES_TO_COPY(unalignedBytes);
 			if (0 < remainingBytes)
 			{
 				/* Advance to next aligned address */
 				address +=4;
 				/* Advance the start of 'buffer' for the remaining bytes */
-				buffer += unalignedBytes; 
+				buffer += BYTES_TO_COPY(unalignedBytes);
 				/* call the internal function to handle the rest of the read request */ 
 				result = read_memory_abstract_internal(target, address, remainingBytes, 1, buffer, increment);
 			}
@@ -3134,13 +3133,14 @@ static int read_memory_abstract_internal(struct target *target, target_addr_t ad
 	int result = ERROR_OK;
 	bool use_aampostincrement = info->has_aampostincrement != YNM_NO;
 
-	LOG_DEBUG("reading %d words of %d bytes from 0x%" TARGET_PRIxADDR, count,
+	LOG_ERROR("reading %d words of %d bytes from 0x%" TARGET_PRIxADDR, count,
 			  size, address);
 
 	/* if size is not 16,8,4,2,1 an assert will be raised */
 	if(!(size == 16 || size == 8 || size == 4 || size == 2 || size == 1))
 	{
-		LOG_DEBUG("Wrong size parameter");
+        LOG_ERROR("Nati_Assert: Size=%d",size);
+        LOG_DEBUG("Wrong size parameter");
 		assert(false);
 	}
 
