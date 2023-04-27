@@ -3235,7 +3235,8 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, const uint8_t *buffer)
 {
     int result = ERROR_OK;
-    uint32_t unalignedBytes, remainingBytes;
+    uint32_t unalignedBytes
+    int remainingBytes;
     uint32_t bufferFromTarget=0;
     uint32_t valueToTarget=0;
     
@@ -3261,7 +3262,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
             /* Get rid of the unaligned part of 'bufferFromTarget' . If alignment=1 mask low 8 bits, if =2 mask low 16 bits and if 3 - low 24 bits */
             bufferFromTarget &= MASK_PER_ALIGNMENT[unalignedBytes];
             /* Copy relevant bytes (according the alignment) from input buffer to 'valueToTarget' */
-            valueToTarget = buf_get_u32(buffer, 0, (4-unalignedBytes)<<3);
+            valueToTarget = buf_get_u32(buffer, 0, BYTES_TO_COPY(unalignedBytes)<<3);
             /* Move the bytes to their correct place in 'valueToTarget' (according the alignment) */
             valueToTarget <<= (unalignedBytes<<3);
             /* Change the relevant bytes in 'bufferFromTarget' according to 'valueToTarget' */
