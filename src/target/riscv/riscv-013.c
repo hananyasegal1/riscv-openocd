@@ -65,6 +65,10 @@ static int read_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment);
 static int write_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, const uint8_t *buffer);
+static int read_memory_abstract_internal(struct target *target, target_addr_t address,
+		uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment);
+static int write_memory_abstract_internal(struct target *target, target_addr_t address,
+		uint32_t size, uint32_t count, const uint8_t *buffer);
 
 /**
  * Since almost everything can be accomplish by scanning the dbus register, all
@@ -78,8 +82,21 @@ static int write_memory(struct target *target, target_addr_t address,
 
 #define RISCV013_INFO(r) riscv013_info_t *r = get_info(target)
 
+#define NO_MASK          0xffffffff
+#define MASK8_HIGH_BITS  0x000000ff
+#define MASK16_HIGH_BITS 0x0000ffff
+#define MASK24_HIGH_BITS 0x00ffffff
+
+#define MASK8_LOW_BITS  0xffffff00
 #define MASK16_LOW_BITS 0xffff0000
-#define MASK8_LOW_BITS 0xffffff00
+#define MASK24_LOW_BITS 0xff000000
+
+const uint32_t MASK_HIGH_PER_ALIGNMENT[4] = {NO_MASK, MASK8_HIGH_BITS, MASK16_HIGH_BITS, MASK24_HIGH_BITS}; 
+const uint32_t MASK_LOW_PER_ALIGNMENT[4] = {NO_MASK, MASK8_LOW_BITS, MASK16_LOW_BITS, MASK24_LOW_BITS}; 
+
+#define ALIGNMENT_TO_4_BYTES  3  /* bitwise AND with '3' tells whether the number is aligned to 4 or not */
+#define FOUR_BYTES 4
+#define ONE_BYTE   1
 
 /*** JTAG registers. ***/
 
@@ -3050,11 +3067,78 @@ static bool mem_should_skip_abstract(struct target *target, target_addr_t addres
 }
 
 /*
+ * A wrapper function to the original read_memory_abstract.
+ * This wrapper function created to handle cases of request to read from an unaligned (to 32bits) address from the target.
+ */
+static int read_memory_abstract(struct target *target, target_addr_t address,
+		uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment)
+{
+    int result = ERROR_OK;
+    uint32_t alignTo32, remainingCount;
+    uint32_t tempValue=0;
+    
+    memset(buffer, 0, count * size);
+    
+  	LOG_ERROR("Nati_R_0: size=%d|count=%d|address=0x%x|buffer(address)=0x%x",size,count,address,buffer);
+    alignTo32 = address & ALIGNMENT_TO_4_BYTES; 
+    if (0 == alignTo32)
+    {
+        /* If 'address' is aligned to 32bits, then just call read_memory_abstract_internal function to handle the read request */
+        result = read_memory_abstract_internal(target, address, size, count, buffer, increment);
+    }
+    else /* If 'address' is not aligned to 32bits then handle the request in 2 steps: 
+            **Step 1** - read 32bits from the nearest aligned address and fetch from them the relevant bytes (1,2 or 3 according the alignment). 
+            **Step 2** - read from the next aligned address the remaining bytes of the read request */
+    {
+        /* Step1 */
+        
+        /* Align the start address to 32bit */
+        address -= (FOUR_BYTES - alignTo32);
+     	LOG_ERROR("Nati_R_1: Aligned address=0x%x",address);
+        /* read one unit of 32bits from target into tempValue */
+        result = read_memory_abstract_internal(target, address, FOUR_BYTES, 1, (uint8_t*)&tempValue, increment); 
+     	LOG_ERROR("Nati_R_2: data that read from the target: 0x%x",tempValue);
+        if (result == ERROR_OK)
+        {
+            /* Get rid of the unaligned part of tempValue. If alignment =1 mask upper 8 bits, if =2 mask upper 16 bits and if 3 - upper 24 bits */
+            tempValue &= MASK_LOW_PER_ALIGNMENT[alignTo32];
+     	    LOG_ERROR("Nati_R_3: Get rid of the unaligned part of tempValue:0x%x",tempValue);
+            /* Move the relevant bits to their correct location befor the copy */
+            tempValue >>= (alignTo32<<3);
+//            LOG_ERROR("Nati_R_3b: Move the remained bits to their correct location in tempValue:0x%x",tempValue);
+            /* Copy to 'buffer' 1 or 2 or 3 bytes from tempValue */
+            memcpy(buffer, &tempValue, alignTo32); 
+            //buffer = buf_get_u32((const uint8_t *)&tempValue, 0, (alignTo32<<3));
+//     	    LOG_ERROR("Nati_R_4: Copy to 'buffer' 1 or 2 or 3 bytes from tempValue:0x%x 0x%x 0x%x 0x%x",*buffer,*(buffer+1),*(buffer+2),*(buffer+3));
+     	    LOG_ERROR("Nati_R_4: Copy to 'buffer' 1 or 2 or 3 bytes from tempValue:0x%x",*(uint32_t*)buffer);
+
+            /* Step 2 */
+            
+            /* Advance start of 'buffer' for the remaining bytes */
+            buffer += alignTo32; 
+     	    LOG_ERROR("Nati_R_5: Advance start of 'buffer' for the remaining bytes:0x%x",buffer);
+            /* Update how many bytes are left to read */
+            remainingCount = (size * count) - alignTo32;
+     	    LOG_ERROR("Nati_R_6: Update how many bytes are left to read:%d",remainingCount);
+            if (0 < remainingCount)
+            {
+                /* call the internal function to handle the rest of the read request */ 
+                LOG_ERROR("Nati_R_7: call the internal function to handle the rest of the read request. address=0x%x, count=%d, buffer(address)=0x%x",address, remainingCount,buffer);
+                result = read_memory_abstract_internal(target, address, ONE_BYTE, remainingCount, buffer, increment);
+            }
+        }
+    }
+    LOG_ERROR("Nati_R_8: Read result: %d",result);
+    return (result);
+}
+
+    
+    /*
  * Performs a memory read using memory access abstract commands. The read sizes
  * supported are 1, 2, and 4 bytes despite the spec's support of 8 and 16 byte
  * aamsize fields in the memory access abstract command.
  */
-static int read_memory_abstract(struct target *target, target_addr_t address,
+static int read_memory_abstract_internal(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, uint8_t *buffer, uint32_t increment)
 {
 	RISCV013_INFO(info);
@@ -3071,8 +3155,6 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 		LOG_DEBUG("Wrong size parameter");
 		assert(false);
 	}
-
-	memset(buffer, 0, count * size);
 
 	unsigned xlen = riscv_xlen(target);
 	unsigned packet_len = size << 3;
@@ -3158,11 +3240,81 @@ static int read_memory_abstract(struct target *target, target_addr_t address,
 }
 
 /*
+ * A wrapper function to the original write_memory_abstract.
+ * This wrapper function created to handle cases of request to write to an unaligned (to 32bits) address in the target.
+ */
+static int write_memory_abstract(struct target *target, target_addr_t address,
+		uint32_t size, uint32_t count, const uint8_t *buffer)
+{
+    int result = ERROR_OK;
+    uint32_t alignTo32, remainingCount;
+    uint8_t bufferFromTarget[4]={0};
+    uint32_t valueToTarget=0;
+    
+    alignTo32 = address & ALIGNMENT_TO_4_BYTES; 
+  	LOG_ERROR("Nati_W_0: size=%d|count=%d|address=0x%x|val1=0x%x|val2=0x%x|val3=0x%x|val4=0x%x",size,count,address,*buffer,*(buffer+1),*(buffer+2),*(buffer+3));
+    if (0 == alignTo32)
+    {
+        /* If 'address' is aligned to 32bits, then just call write_memory_abstract_internal function to handle the write request */
+        result = write_memory_abstract_internal(target, address, size, count, buffer);
+    }
+    /* If 'address' is not aligned to 32bits then handle the request in 2 steps:
+     **Step 1** - read 32bits from target from aligned address. Modify the relevant bytes (1,2 or 3) and write back to target.
+     **Step 2** - write the remaining bytes of the write request to the next aligned address  */
+    else
+    {
+        /* Step1 */
+        
+        /* Align the start address to 32bit */
+        address -= alignTo32;
+     	LOG_ERROR("Nati_W_1: Aligned address=0x%x",address);
+        /* Read one unit of 32bits from target into 'bufferFromTarget' */
+        result = read_memory_abstract_internal(target, address, FOUR_BYTES, 1, bufferFromTarget, 0);
+     	LOG_ERROR("Nati_W_2: read_memory_abstract_internal=0x%x",*(uint32_t *)bufferFromTarget);
+        if (result == ERROR_OK)
+        {
+            /* Get rid of the unaligned part of 'bufferFromTarget' . If alignment=1 mask upper 8 bits, if =2 mask upper 16 bits and if 3 - upper 24 bits */
+            (*(uint32_t *)bufferFromTarget) &= MASK_HIGH_PER_ALIGNMENT[alignTo32];
+     	    LOG_ERROR("Nati_W_3: Get rid of the unaligned part of bufferFromTarget=0x%x",*(uint32_t*)bufferFromTarget);
+            /* Copy relevant bytes (according the alignment) from input buffer to 'valueToTarget' */
+            valueToTarget = buf_get_u32(buffer, 0, (FOUR_BYTES-alignTo32)<<3);
+     	    LOG_ERROR("Nati_W_4: Copy relevant bytes (according the alignment) from input buffer to valueToTarget=0x%x",valueToTarget);
+            /* Move the bytes to their correct place in 'valueToTarget' (according the alignment) */
+            valueToTarget <<= (alignTo32<<3);
+     	    LOG_ERROR("Nati_W_5: Move the bytes to their correct place in 'valueToTarget' (according the alignment)=0x%x",valueToTarget);
+            /* Change the relevant bytes in 'bufferFromTarget' according to 'valueToTarget' */
+            *(uint32_t*)bufferFromTarget |= valueToTarget;
+     	    LOG_ERROR("Nati_W_6: Change the relevant bytes in 'bufferFromTarget' according to 'valueToTarget'=0x%x",*(uint32_t*)bufferFromTarget);
+            /* Write back the updated 32bits unit ('bufferFromTarget') to target */ 
+            result = write_memory_abstract_internal(target, address, FOUR_BYTES, 1, (uint8_t*)bufferFromTarget);
+            if (result == ERROR_OK)
+            {
+                /* Step 2 */
+            
+                /* Advance start of input 'buffer' for the remaining bytes */
+                buffer += alignTo32; 
+                /* Update how many bytes are left to write */
+                remainingCount = (size * count) - alignTo32;
+     	        LOG_ERROR("Nati_W_7: buffer[0]=0x%x | buffer[1]=0x%x | remainingCount=%d",*buffer,*(buffer+1),remainingCount);
+                if (0 < remainingCount)
+                {
+                    /* call the internal function to handle the rest of the write request */ 
+                    write_memory_abstract_internal(target, address, ONE_BYTE, remainingCount, buffer);
+                }
+            } 
+        }
+    }
+    
+    LOG_ERROR("Nati_W_8: result: %d",result);
+    return (result);
+}
+
+/*
  * Performs a memory write using memory access abstract commands. The write
  * sizes supported are 1, 2, and 4 bytes despite the spec's support of 8 and 16
  * byte aamsize fields in the memory access abstract command.
  */
-static int write_memory_abstract(struct target *target, target_addr_t address,
+static int write_memory_abstract_internal(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, const uint8_t *buffer)
 {
 	RISCV013_INFO(info);
@@ -3193,24 +3345,30 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 		count = count << shift_count;
 	}
 
+	LOG_ERROR("Nati_W0: size=%d|count=%d|width=%d|width32=%d|address=0x%x|packet_len=%d|use_aampostincrement=%d|val1=0x%x|val2=0x%x|val3=0x%x|val4=0x%x",size,count,width,width32,address,packet_len,use_aampostincrement,*buffer,*(buffer+1),*(buffer+2),*(buffer+3));
+
 	/* Create the command (physical address, postincrement, write) */
 	uint32_t command = access_memory_command(target, false, width32, use_aampostincrement, true);
 
+    LOG_ERROR("Nati_W1: width32:%d", width32);
 	/* Execute the writes */
 	const uint8_t *p = buffer;
 	bool updateaddr = true;
 	for (uint32_t c = 0; c < count; c++) {
 		riscv_reg_t value = 0;
 		/* Move data to arg0 */
+        LOG_ERROR("Nati_W2: c = %d",c);
 		if (width32 == 64)
 		{
 			value = buf_get_u64(p, 0, 8 * size );
+            LOG_ERROR("Nati_W3: value to write=0x%x",value);
 		}
 		else
 		{
 			if (size == 4)
 			{
 				value = buf_get_u32(p, 0, 8 * size);
+                LOG_ERROR("Nati_W4: value to write=0x%x",value);
 			}
 			/* packet_len is lower that 32 bits */
 			else
@@ -3220,7 +3378,9 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 				command = access_memory_command(target, false, width32, use_aampostincrement, true);
 				uint8_t read_buffer[4];
 				read_memory_abstract(target, address + c * size, size, 1, read_buffer, 0);
+                LOG_ERROR("Nati_W5a: [0]:0x%x,[1]:0x%x,[2]:0x%x,[3]:0x%x",read_buffer[0],read_buffer[1],read_buffer[2],read_buffer[3]);
 				value = buf_get_u32(p, 0, 8 * size);
+                LOG_ERROR("Nati_W5b: value to write to target=0x%x",value);
 
 				if (size == 2)
 				{
@@ -3243,6 +3403,8 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 		if (updateaddr) {
 			/* Set arg1 to the address: address + c * size */
 			result = write_abstract_arg(target, 1, address + c * size, xlen);
+            LOG_ERROR("Nati_W8: result=%d|address=0x%x|xlen=%d",result,(address + c * size),xlen);
+            
 			if (result != ERROR_OK) {
 				LOG_ERROR("Failed to write arg1 during write_memory_abstract().");
 				return result;
@@ -3256,6 +3418,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 			if (result == ERROR_OK) {
 				/* Safety: double-check that the address was really auto-incremented */
 				riscv_reg_t new_address = read_abstract_arg(target, 1, xlen);
+                LOG_ERROR("Nati_W9: address=0x%x|new-address=0x%x,size=%d",address,new_address,size);
 				if (new_address == address + size) {
 					LOG_DEBUG("aampostincrement is supported on this target.");
 					info->has_aampostincrement = YNM_YES;
@@ -3265,6 +3428,7 @@ static int write_memory_abstract(struct target *target, target_addr_t address,
 				}
 			} else {
 				/* Try the same access but with postincrement disabled. */
+                LOG_ERROR("Nati_W10: result = fail");
 				command = access_memory_command(target, false, width32, false, true);
 				result = execute_abstract_command(target, command);
 				if (result == ERROR_OK) {
@@ -3753,7 +3917,10 @@ static int read_memory(struct target *target, target_addr_t address,
 			if (mem_should_skip_abstract(target, address, size, increment, true, &abstract_result))
 				continue;
 
+            uint32_t *p = (uint32_t*)buffer;
+  	        LOG_ERROR("Nati_read_memory - BEFORE: address=0x%x|size=%d|count=%d|data=0x%x",address,size,count,*p);
 			ret = read_memory_abstract(target, address, size, count, buffer, increment);
+  	        LOG_ERROR("Nati_read_memory - AFTER: address=0x%x|size=%d|count=%d|data=0x%x",address,size,count,*p);
 
 			if (ret != ERROR_OK)
 				abstract_result = "failed";
@@ -4196,8 +4363,12 @@ static int write_memory(struct target *target, target_addr_t address,
 				sysbus_result = "failed";
 		} else if (method == RISCV_MEM_ACCESS_ABSTRACT) {
 			if (mem_should_skip_abstract(target, address, size, 0, false, &abstract_result))
-				continue;
-
+            {
+                LOG_ERROR("Nati_write_memory: memory should skip abstract");
+                continue;
+            }
+            const uint32_t* p = (const uint32_t*)buffer;
+            LOG_ERROR("Nati_write_memory: call write abstract. address=0x%x | size=%d | count=%d | buffer=0x%x", address, size, count, *p);
 			ret = write_memory_abstract(target, address, size, count, buffer);
 
 			if (ret != ERROR_OK)
